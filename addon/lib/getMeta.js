@@ -10,11 +10,25 @@ const { ramMetaCache, ramImdbCache } = require("./getCache");
 
 const blacklistLogoUrls = ["https://assets.fanart.tv/fanart/tv/0/hdtvlogo/-60a02798b7eea.png"];
 
-const extractAgeRating = (res, type, language) => {
-    const countryCode = language.split('-')[1]?.toUpperCase();
+const convertForPortuguese = (certificacao) => {
+    if (!certificacao) return null;
+    const mapaBR = { 
+        "L": "L", "AL": "L", "G": "L", "TV-G": "L", "TV-Y": "L", "TV-Y7": "L",
+        "10": "10", "PG": "10", "TV-PG": "10", 
+        "12": "12", "PG-13": "12", "TV-14": "12", 
+        "14": "14", 
+        "16": "16", "R": "16", "NC-17": "18", 
+        "18": "18", "TV-MA": "18" 
+    }; 
+    const sigla = certificacao.toUpperCase().trim(); 
+    return mapaBR[sigla] || sigla;
+}
+
+const extractAgeRating = (res, type) => {
+    const countryCode = 'BR'; // Força o Brasil como prioridade máxima
     if (type === 'movie' && res.release_dates && res.release_dates.results) {
         let countryRelease = res.release_dates.results.find(r => r.iso_3166_1 === countryCode);
-        if (!countryRelease && countryCode !== 'US') {
+        if (!countryRelease) {
             countryRelease = res.release_dates.results.find(r => r.iso_3166_1 === 'US');
         }
         if (countryRelease && Array.isArray(countryRelease.release_dates)) {
@@ -22,14 +36,16 @@ const extractAgeRating = (res, type, language) => {
             if (!ratingObj) {
                 ratingObj = countryRelease.release_dates.find(d => d.certification);
             }
-            return ratingObj ? ratingObj.certification : null;
+            const cert = ratingObj ? ratingObj.certification : null;
+            return convertForPortuguese(cert);
         }
     } else if (type === 'series' && res.content_ratings && res.content_ratings.results) {
         let ratingObj = res.content_ratings.results.find(r => r.iso_3166_1 === countryCode);
-        if (!ratingObj && countryCode !== 'US') {
+        if (!ratingObj) {
             ratingObj = res.content_ratings.results.find(r => r.iso_3166_1 === 'US');
         }
-        return ratingObj ? ratingObj.rating : null;
+        const cert = ratingObj ? ratingObj.rating : null;
+        return convertForPortuguese(cert);
     }
     return null;
 }
@@ -109,7 +125,6 @@ const processLogo = (logo) => {
     return logo.replace("http://", "https://");
 };
 
-
 const buildLinks = (
     imdbRating,
     imdbId,
@@ -128,10 +143,9 @@ const buildLinks = (
         Utils.parseShareLink(title, imdbId, type),
         ...Utils.parseGenreLink(genres, type, language, imdbId, ageRating, showAgeRatingInGenres),
         ...Utils.parseCreditsLink(credits, castCount),
-        ...Utils.parseCollection(collObj) //empty if no collection
+        ...Utils.parseCollection(collObj)
     ];
 
-// Helper function to add age rating to genres
 const addAgeRatingToGenres = (ageRating, genres, showAgeRatingInGenres = true) => {
     if (!ageRating || !showAgeRatingInGenres) return genres;
     return [ageRating, ...genres];
@@ -145,12 +159,11 @@ const fetchCollectionData = async (moviedb, collTMDBId, language, tmdbId) => {
         if (!res.parts) {
             return null;
         }
-        res.parts = res.parts.filter((part) => part.id !== tmdbId); //remove self from collection
+        res.parts = res.parts.filter((part) => part.id !== tmdbId);
         return res;
     });
 };
 
-// Movie specific functions
 const fetchMovieData = async (moviedb, tmdbId, language) => {
     try {
         return await moviedb.movieInfo({
@@ -159,7 +172,6 @@ const fetchMovieData = async (moviedb, tmdbId, language) => {
             append_to_response: "videos,credits,external_ids,release_dates"
         });
     } catch (e) {
-        // Swallow 404s (not found) and return null; rethrow other errors
         if (e?.response?.status === 404) return null;
         throw e;
     }
@@ -205,7 +217,7 @@ const buildMovieResponse = async (res, type, language, tmdbId, config = {}) => {
 
     let resolvedAgeRating = null;
     if (enableAgeRating) {
-        resolvedAgeRating = extractAgeRating(res, type, language);
+        resolvedAgeRating = extractAgeRating(res, type);
     }
 
     const response = {
@@ -257,7 +269,6 @@ const buildMovieResponse = async (res, type, language, tmdbId, config = {}) => {
     return response;
 };
 
-// TV show specific functions
 const fetchTvData = async (moviedb, tmdbId, language) => {
     try {
         return await moviedb.tvInfo({
@@ -318,7 +329,7 @@ const buildTvResponse = async (res, type, language, tmdbId, config = {}) => {
 
     let resolvedAgeRating = null;
     if (enableAgeRating) {
-        resolvedAgeRating = extractAgeRating(res, type, language);
+        resolvedAgeRating = extractAgeRating(res, type);
     }
 
     const response = {
@@ -369,20 +380,9 @@ const buildTvResponse = async (res, type, language, tmdbId, config = {}) => {
     };
     if (hideInCinemaTag) delete response.imdb_id;
 
-    // // Season check (without opening issue)
-    // if (response.imdb_id && response.videos && response.name) {
-    //     checkSeasonsAndReport(
-    //         tmdbId,
-    //         response.imdb_id,
-    //         { meta: response },
-    //         response.name
-    //     );
-    // }
-
     return response;
 };
 
-// Main function
 async function getMeta(type, language, tmdbId, config = {}) {
     const cacheKey = getCacheKey(type, language, tmdbId, config);
     if (ramMetaCache) {
@@ -411,29 +411,24 @@ async function getMeta(type, language, tmdbId, config = {}) {
 
     try {
         const moviedb = getTmdbClient(config);
-        // First, fetch raw TMDB data with 404 handling
         const tmdbRes = (type === "movie")
             ? await fetchMovieData(moviedb, tmdbId, language)
             : await fetchTvData(moviedb, tmdbId, language);
 
         if (!tmdbRes) {
             console.warn(`TMDB ${type} not found: ${tmdbId} (${language})`);
-            // Return empty meta on 404 instead of throwing
             return { meta: {} };
         }
 
-        // Build the meta object
         const meta = (type === "movie")
             ? await buildMovieResponse(tmdbRes, type, language, tmdbId, config)
             : await buildTvResponse(tmdbRes, type, language, tmdbId, config);
 
-        // Cache and return
         if (ramMetaCache) {
             await ramMetaCache.set(cacheKey, meta);
         }
         return { meta };
     } catch (error) {
-        // Log and return empty meta instead of throwing to avoid crashing the process
         console.error(`Error in getMeta: ${error?.message || error}`);
         return { meta: {} };
     }
